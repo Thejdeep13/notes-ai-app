@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notes AI</title>
+<style>
+  :root { --bg:#f5f7fb; --card:#fff; --ink:#1c2333; --muted:#6b7488; --brand:#2563eb; --line:#e3e8f2; --danger:#dc2626; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--ink); }
+  header { background:var(--brand); color:#fff; padding:14px 20px; display:flex; justify-content:space-between; align-items:center; }
+  header h1 { font-size:18px; margin:0; }
+  main { max-width:760px; margin:20px auto; padding:0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  h2 { font-size:16px; margin:0 0 12px; }
+  input, textarea { width:100%; padding:10px; border:1px solid var(--line); border-radius:8px; font:inherit; margin-bottom:10px; }
+  textarea { min-height:90px; resize:vertical; }
+  button { background:var(--brand); color:#fff; border:0; border-radius:8px; padding:8px 14px; font:inherit; cursor:pointer; }
+  button.secondary { background:#eef2ff; color:var(--brand); }
+  button.danger { background:#fee2e2; color:var(--danger); }
+  button.ghost { background:transparent; color:#fff; border:1px solid rgba(255,255,255,.6); }
+  button:disabled { opacity:.6; cursor:wait; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  .note h3 { margin:0 0 6px; font-size:16px; }
+  .note p { margin:0 0 10px; white-space:pre-wrap; }
+  .tags span { display:inline-block; background:#eef2ff; color:var(--brand); border-radius:999px; padding:2px 10px; font-size:12px; margin:0 6px 6px 0; }
+  .ai-box { background:#f0fdf4; border:1px solid #bbf7d0; border-radius:8px; padding:10px; margin-top:10px; white-space:pre-wrap; }
+  .error { color:var(--danger); font-size:14px; min-height:20px; }
+  .muted { color:var(--muted); font-size:14px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Notes AI</h1>
+  <div id="userbar" class="hidden row"><span id="whoami"></span><button class="ghost" id="logout">Log out</button></div>
+</header>
+<main>
+  <!-- Auth -->
+  <section id="auth" class="card">
+    <h2>Sign in or create an account</h2>
+    <input id="username" placeholder="Username (min 3 chars)" autocomplete="username">
+    <input id="password" type="password" placeholder="Password (min 6 chars)" autocomplete="current-password">
+    <div class="row">
+      <button id="login">Log in</button>
+      <button id="register" class="secondary">Register</button>
+    </div>
+    <div id="auth-error" class="error"></div>
+  </section>
+
+  <!-- App -->
+  <section id="app" class="hidden">
+    <div class="card">
+      <h2>New note</h2>
+      <input id="title" placeholder="Title" maxlength="200">
+      <textarea id="content" placeholder="Write something..." maxlength="10000"></textarea>
+      <button id="add">Add note</button>
+      <div id="note-error" class="error"></div>
+    </div>
+
+    <div class="card">
+      <h2>Ask AI about your notes</h2>
+      <input id="question" placeholder="e.g. What did I write about Hibernate?" maxlength="1000">
+      <button id="ask">Ask</button>
+      <div id="answer" class="ai-box hidden"></div>
+    </div>
+
+    <div id="notes"></div>
+  </section>
+</main>
+
+<script>
+  let token = null;
+  try { token = localStorage.getItem("token"); } catch (e) { /* storage unavailable */ }
+
+  const $ = (id) => document.getElementById(id);
+
+  async function api(path, method = "GET", body) {
+    const headers = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = "Bearer " + token;
+    const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    if (res.status === 401 && !path.startsWith("/api/auth")) { logout(); throw new Error("Session expired. Please log in again."); }
+    if (res.status === 204) return null;
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* no body */ }
+    if (!res.ok) throw new Error((data && (data.message || data.error)) || "Request failed (" + res.status + ")");
+    return data;
+  }
+
+  function setSession(data) {
+    token = data.token;
+    try { localStorage.setItem("token", token); localStorage.setItem("user", data.username); } catch (e) {}
+    $("whoami").textContent = data.username;
+    showApp();
+  }
+
+  function logout() {
+    token = null;
+    try { localStorage.removeItem("token"); localStorage.removeItem("user"); } catch (e) {}
+    $("app").classList.add("hidden");
+    $("userbar").classList.add("hidden");
+    $("auth").classList.remove("hidden");
+  }
+
+  async function auth(kind) {
+    $("auth-error").textContent = "";
+    try {
+      const data = await api("/api/auth/" + kind, "POST", {
+        username: $("username").value.trim(), password: $("password").value });
+      $("password").value = "";
+      setSession(data);
+    } catch (e) { $("auth-error").textContent = e.message; }
+  }
+
+  function showApp() {
+    $("auth").classList.add("hidden");
+    $("app").classList.remove("hidden");
+    $("userbar").classList.remove("hidden");
+    try { $("whoami").textContent = localStorage.getItem("user") || ""; } catch (e) {}
+    loadNotes();
+  }
+
+  async function loadNotes() {
+    try {
+      const notes = await api("/api/notes");
+      const box = $("notes");
+      box.replaceChildren();
+      if (!notes.length) {
+        const p = document.createElement("p");
+        p.className = "muted";
+        p.textContent = "No notes yet. Add your first one above.";
+        box.appendChild(p);
+        return;
+      }
+      notes.forEach((n) => box.appendChild(renderNote(n)));
+    } catch (e) { $("note-error").textContent = e.message; }
+  }
+
+  function el(tag, text, cls) {
+    const e = document.createElement(tag);
+    if (text !== undefined) e.textContent = text;   // textContent keeps user input safe from XSS
+    if (cls) e.className = cls;
+    return e;
+  }
+
+  function renderTags(container, tags) {
+    container.replaceChildren();
+    (tags || "").split(",").map((t) => t.trim()).filter(Boolean)
+      .forEach((t) => container.appendChild(el("span", "#" + t)));
+  }
+
+  function renderNote(n) {
+    const card = el("div", undefined, "card note");
+    card.appendChild(el("h3", n.title));
+    card.appendChild(el("p", n.content || ""));
+    const tags = el("div", undefined, "tags");
+    renderTags(tags, n.tags);
+    card.appendChild(tags);
+
+    const row = el("div", undefined, "row");
+    const sumBtn = el("button", "✨ Summarize", "secondary");
+    const tagBtn = el("button", "🏷 Suggest tags", "secondary");
+    const delBtn = el("button", "Delete", "danger");
+    row.append(sumBtn, tagBtn, delBtn);
+    card.appendChild(row);
+
+    const out = el("div", undefined, "ai-box hidden");
+    card.appendChild(out);
+
+    async function run(btn, fn) {
+      btn.disabled = true;
+      try { await fn(); }
+      catch (e) { out.textContent = e.message; out.classList.remove("hidden"); }
+      finally { btn.disabled = false; }
+    }
+
+    sumBtn.onclick = () => run(sumBtn, async () => {
+      out.textContent = "Thinking...";
+      out.classList.remove("hidden");
+      const r = await api("/api/ai/notes/" + n.id + "/summarize", "POST");
+      out.textContent = r.summary;
+    });
+    tagBtn.onclick = () => run(tagBtn, async () => {
+      const r = await api("/api/ai/notes/" + n.id + "/tags", "POST");
+      renderTags(tags, r.tags);
+    });
+    delBtn.onclick = () => run(delBtn, async () => {
+      await api("/api/notes/" + n.id, "DELETE");
+      loadNotes();
+    });
+    return card;
+  }
+
+  async function addNote() {
+    $("note-error").textContent = "";
+    try {
+      await api("/api/notes", "POST", { title: $("title").value.trim(), content: $("content").value });
+      $("title").value = ""; $("content").value = "";
+      loadNotes();
+    } catch (e) { $("note-error").textContent = e.message; }
+  }
+
+  async function askAi() {
+    const q = $("question").value.trim();
+    if (!q) return;
+    const box = $("answer");
+    box.classList.remove("hidden");
+    box.textContent = "Thinking...";
+    $("ask").disabled = true;
+    try { box.textContent = (await api("/api/ai/ask", "POST", { question: q })).answer; }
+    catch (e) { box.textContent = e.message; }
+    finally { $("ask").disabled = false; }
+  }
+
+  $("login").onclick = () => auth("login");
+  $("register").onclick = () => auth("register");
+  $("logout").onclick = logout;
+  $("add").onclick = addNote;
+  $("ask").onclick = askAi;
+
+  if (token) showApp();
+</script>
+</body>
+</html>
